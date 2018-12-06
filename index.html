@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+<!-- Desert Energy v0.1
+-->
+<title>Desert Energy Test Page</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+<link rel="stylesheet" type="text/css" href="https://fonts.googleapis.com/css?family=Roboto"/>
+<style>
+div.log1 {    
+    height: 199px;
+	overflow-x: hidden;
+    overflow-y: scroll;
+}
+</style>
+
+<script>
+// Global Genesys object
+	if (!window._genesys)
+		window._genesys = {};
+	if (!window._gt)
+		window._gt = [];
+
+		// Initializes widgets configuration object, and enables Lazy-Loading of the Genesys Widgets:
+</script>
+	
+<script src="cxbus.min.js" onload="javascript:CXBus.configure({debug:true,pluginsPath:'plugins/'});CXBus.loadFile('widgets.config.js').done(function(){CXBus.loadPlugin('widgets-core')});"></script>
+<script>
+// GMS api-only.
+// Works with the full-on SwiftRouting chat workflow (modd'ed with the 'v1' Swift API-handler). This v2 version of the website uses a callback, asynchronous approach. 
+//
+// *** GLOBALS ***
+const DEBUG_SCROLL = true; // scroll every api call, or just show last line
+const DEBUG_CONSOLE = true; // output also to browser console or not
+const INTERVAL_CHECK_HOURS = 15000; // check Swift hours-of-operation this often (ms)
+const TIMEOUT = 10000; // consider the Swift API non-responsive if it takes longer than this for a response (ms)
+
+var time_swiftResultStart;
+var timer_swiftapiNoOk;
+var timer_checkHours;
+var debugStr = ''; // debugging output
+
+
+function swiftapiOpen(cbOK, timeout, param) {
+	// starts an ORS session. Requires [openmedia.<servicename>] defined in GMS with endpoint pointing to Swiftrouting's interaction queue.
+	//	
+	log ( 0, 'Swift Hours Lookup: initiating...');
+	//document.getElementById("resultDebug").innerHTML = 'Swift Hours Lookup: initiating...';
+	time_swiftResultStart  = new Date(); // our 'now' to control only waiting TIMEOUT ms for a valid ccStatus result
+	var xhttp = new XMLHttpRequest();	
+    xhttp.onreadystatechange = function() {
+        if (this.readyState == 4 && this.status == 200) {
+			clearTimeout(timer_swiftapiNoOk);			
+			cbOK(JSON.parse(this.responseText).interactionId, timeout);
+		}
+		else {
+			//alert("(status is not 200)  readyState: [" +this.readyState + "], status: [" + this.status + "], responseText: [" + this.responseText + "]");
+		}		
+	};
+    xhttp.open("POST", "http://genlablinux:8080/genesys/2/openmedia/swiftapi", true);
+    xhttp.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+	timer_swiftapiNoOk = setTimeout ( swiftapiNoOk, 5000);
+    xhttp.send(param);
+}
+
+function log( elapsed, str ) {
+	var elapsedStr = ( elapsed / 1000).toFixed(3);
+	if (DEBUG_SCROLL)
+		debugStr += '<BR>' + '[' + elapsedStr + '] ' + str;
+	else
+		debugStr = '[' + elapsedStr + '] ' + str;
+	document.getElementById("resultDebug").innerHTML = debugStr;
+	document.getElementById("resultDebug").scrollTop = document.getElementById("resultDebug").scrollHeight
+	if (DEBUG_CONSOLE) {
+		console.log ('[' + elapsedStr + '] ' + str);
+	}	
+}
+
+function swiftapiGetHours(ixnid, timeout) {	
+	
+	var now = new Date();
+	var elapsed = now - time_swiftResultStart;
+	
+	if ( elapsed >= timeout ) {
+		log (elapsed, 'Swift Hours Lookup: TIMED OUT!');
+	}
+	else {
+		// check if Swift API result is ready
+		log (elapsed, 'Swift Hours Lookup: polling API for result...');
+		var xhttp = new XMLHttpRequest();	
+		xhttp.onreadystatechange = function() {
+			if (this.readyState == 4 && this.status == 200) {
+				clearTimeout(timer_swiftapiNoOk);
+				swiftDisplayHours( JSON.parse(this.responseText), timeout );
+				// displays the API get here:  document.getElementById("result1").innerHTML = this.responseText;	
+				//alert( "DEBUG: big response should be displayed within HTML now" );
+			}
+			else {
+				//alert("(status is not 200)  readyState: [" +this.readyState + "], status: [" + this.status + "], responseText: [" + this.responseText + "]");
+			}		
+		};
+		xhttp.open("POST", "http://genlablinux:8080/genesys/2/openmedia/swiftapi/" + ixnid + "/get", true);
+		xhttp.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+		timer_swiftapiNoOk = setTimeout ( swiftapiNoOk, 5000);
+		xhttp.send();
+	}
+}
+
+function swiftapiNoOk() {
+	// Timer: no OK received to the Swift command
+	var now = new Date();
+	var elapsed = now - time_swiftResultStart;
+	log (elapsed, 'TIMEOUT: timed out waiting for a Swift OK response.');
+}
+
+function swiftDisplayHours(resp, timeout) {	
+
+	var now = new Date();
+	var elapsed = now - time_swiftResultStart;	
+	var ccStatus;	
+	
+	ccStatus = swiftParseHours(resp);
+	if ( ccStatus === '' ) {
+		log (elapsed, 'Swift Hours Lookup: processing...');		
+		setTimeout( function(){swiftapiGetHours(resp.interactionProperties.interactionId, timeout);}, 2000 );
+	}
+	else if ( ccStatus === 'invalid_request' ) {
+		log (elapsed, 'ERROR: invalid Swift API request detected');
+	}
+	else if ( ccStatus === 'missing_request' ) {
+		log (elapsed, 'ERROR: missing Swift API request detected');
+	}
+	else if ( ccStatus === 'no_interaction' ) {
+		log (elapsed, 'ERROR: malformed Swift API call');
+	}
+	else {
+		log (elapsed, 'Swift Hours Lookup: done');
+		document.getElementById("result1").innerHTML = 'Swift Hours are: [' + ccStatus + ']';
+		if (ccStatus == 'open')
+			window._genesys.widgets.bus.command('WebChat.invite');
+	}
+}
+
+function swiftParseHours(resp) {
+	// parses the Swift API response JSON object to determine ccStatus value, if available
+
+	var proc_success = false, apiRequestFound = false;
+	var ccStatus = '', i;
+	//log(9999999, JSON.stringify(resp));
+	if ( (resp.hasOwnProperty('interactionProperties') ) && (resp.interactionProperties.hasOwnProperty('interactionUserData') ) ) {		
+		for (i in resp.interactionProperties.interactionUserData)
+			if ( resp.interactionProperties.interactionUserData[i].key == 'apiRequest') {        //&& (resp.interactionProperties.interactionUserData[i].value == 'done'))
+				apiRequestFound = true;
+				if (resp.interactionProperties.interactionUserData[i].value == 'done')
+					proc_success = true;
+			}
+			else if (resp.interactionProperties.interactionUserData[i].key == 'ccstatus') {			
+				ccStatus = resp.interactionProperties.interactionUserData[i].value;
+				if (proc_success)
+					return ccStatus;
+			}
+		
+		if ( !apiRequestFound )
+			return 'missing_request'; // stops us calling swiftapiGetHours() on a regular chat more than once
+		if (proc_success)
+			return ccStatus;
+		else
+			return '';
+	}
+	else
+		return 'no_interaction';
+}
+
+function hideLog() {
+	if (document.getElementById("resultDebug").style.visibility == 'hidden') {
+		document.getElementById("resultDebug").style.visibility = 'visible';
+		document.getElementById("hideLog").value = "Hide Log";
+	}
+	else {
+		document.getElementById("resultDebug").style.visibility = 'hidden';
+		document.getElementById("hideLog").value = "Show Log";
+	}
+}
+</script>
+</head>
+
+<!-- Start periodic checking of Swift Hours of Operation:
+<body onload="timer_checkHours = setInterval( function(){swiftapiOpen(swiftapiGetHours, TIMEOUT, 'userData[apiRequest]=checkHours&userData[InteractionPurpose]=Chat_CONS_All_English_Default');},INTERVAL_CHECK_HOURS)">
+-->
+
+<h1>Desert Energy Test Page</h1>
+<h2>(Altocloud Legacy integration with Genesys Chat)</h2>
+<div id="resultDebug" class="log1">--- <BR></div>
+<p id="result1">--- <BR></p>
+<div>
+<a href="page2.html">Go to Page 2</a>
+</div>
+<p id="demo">Click button:</p>
+<!--
+<button type="button" onclick="swiftapiOpen(swiftapiGetHours, TIMEOUT, 'userData[apiRequest]=checkHours&userData[InteractionPurpose]=Chat_CONS_All_English_Default')">Get Swift Hours</button>
+-->
+
+<div>
+<input type="button" id="webchatInvite" onclick="window._genesys.widgets.bus.command('WebChat.invite')" value="Invite to Webchat" />
+</div>
+<div> <BR>
+<input type="button" id="webchatStart" onclick="window._genesys.widgets.bus.command('WebChat.open')" value="Start Webchat" />
+</div>
+<div> <BR>
+<input type="button" id="cancelLoop" onclick="clearTimeout(timer_checkHours)" value="Stop Checking Hours" />
+</div>
+<div> <BR>
+<input type="button" id="hideLog" onclick="hideLog()" value="Hide Log" />
+</div>
+</body>
+</html>
